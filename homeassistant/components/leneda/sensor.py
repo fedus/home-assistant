@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import logging
 from typing import Final
 
@@ -18,7 +17,7 @@ from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
 )
 
-from .const import CONF_METERING_POINTS, DOMAIN, SENSOR_TYPES, UNIT_TO_AGGREGATED_UNIT
+from .const import DOMAIN, SENSOR_TYPES, UNIT_TO_AGGREGATED_UNIT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,23 +31,18 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up the Leneda sensors."""
+    """Set up the Leneda sensors for all metering point subentries."""
+    _LOGGER.debug("Setting up entry %s", entry.entry_id)
+
     coordinator = entry.runtime_data
-
-    # Get metering points and selected sensors from config entry
-    metering_points = entry.data[CONF_METERING_POINTS]
-    selected_sensors = entry.options.get("selected_sensors", {})
-    _LOGGER.debug("Setting up sensors for metering points: %s", metering_points)
-    _LOGGER.debug("Selected sensors configuration: %s", selected_sensors)
-
     sensors: list[LenedaEnergySensor] = []
-    for metering_point in metering_points:
-        # Get the selected sensor types for this metering point
-        # If no sensors are selected (old config), use all available sensors
-        sensor_types = selected_sensors.get(metering_point, list(SENSOR_TYPES.keys()))
-        _LOGGER.debug(
-            "Setting up sensors for metering point %s: %s", metering_point, sensor_types
-        )
+
+    # Create sensors for each metering point subentry
+    for subentry_id, subentry in entry.subentries.items():
+        metering_point = subentry.data["metering_point"]
+        sensor_types = subentry.data["sensors"]
+        _LOGGER.debug("Setting up sensors for metering point: %s", metering_point)
+        _LOGGER.debug("Sensor types: %s", sensor_types)
 
         for sensor_type in sensor_types:
             if sensor_type not in SENSOR_TYPES:
@@ -60,44 +54,27 @@ async def async_setup_entry(
                 )
                 continue
 
-            try:
-                sensors.append(
-                    LenedaEnergySensor(
-                        coordinator,
-                        metering_point,
-                        sensor_type,
-                        entry.data["energy_id"],
-                    )
-                )
-            except (ValueError, KeyError, AttributeError) as err:
-                _LOGGER.error(
-                    ERROR_SENSOR_CREATION_FAILED,
-                    sensor_type,
-                    metering_point,
-                    str(err),
-                )
+            sensors.append(LenedaEnergySensor(coordinator, metering_point, sensor_type))
 
-    _LOGGER.debug(
-        "Created %d sensors for %d metering points", len(sensors), len(metering_points)
-    )
-    async_add_entities(sensors, True)
+        _LOGGER.debug(
+            "Created %d sensors for metering point %s", len(sensors), metering_point
+        )
+
+        async_add_entities(sensors, config_subentry_id=subentry_id)
 
 
 class LenedaEnergySensor(CoordinatorEntity, SensorEntity):
     """Representation of a Leneda sensor."""
 
+    _attr_has_entity_name = True
+
     def __init__(
-        self,
-        coordinator: DataUpdateCoordinator,
-        metering_point: str,
-        sensor_type: str,
-        energy_id: str,
+        self, coordinator: DataUpdateCoordinator, metering_point: str, sensor_type: str
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._metering_point: str = metering_point
         self._sensor_type: str = sensor_type
-        self._energy_id: str = energy_id
 
         # Get sensor configuration
         sensor_config = SENSOR_TYPES[sensor_type]
@@ -112,27 +89,25 @@ class LenedaEnergySensor(CoordinatorEntity, SensorEntity):
         self._attr_device_class = sensor_config["device_class"]
         self._attr_state_class = sensor_config["state_class"]
         self._attr_native_unit_of_measurement = UNIT_TO_AGGREGATED_UNIT.get(
-            obis_info.unit, obis_info.unit
+            obis_info.unit.lower(), obis_info.unit
         )
         self._attr_translation_key = sensor_type
 
         # Set device info
         self._attr_device_info = {
-            "identifiers": {(DOMAIN, f"{energy_id}_{metering_point}")},
-            "name": f"{energy_id} / {metering_point}",
+            "identifiers": {(DOMAIN, metering_point)},
+            "name": metering_point,
             "manufacturer": "Leneda",
-            "model": "Energy Meter",
+            "model": "Metering point",
         }
 
         # Set additional attributes
         self._attr_extra_state_attributes = {
             "metering_point": metering_point,
-            "energy_id": energy_id,
             "sensor_type": sensor_type,
             "obis_code": self._obis_code,
             "obis_code_description": obis_info.description,
             "service_type": obis_info.service_type,
-            "year": datetime.now().year,
         }
 
     @property

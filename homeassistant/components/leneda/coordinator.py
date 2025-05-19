@@ -1,4 +1,4 @@
-"""The Leneda coordinator."""
+"""The Leneda coordinator for handling meter data and statistics."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any, cast
 
 from leneda import LenedaClient
 from leneda.exceptions import UnauthorizedException
+from leneda.obis_codes import get_obis_info
 
 from homeassistant.components.recorder.models import (
     StatisticData,
@@ -22,27 +23,27 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.components.recorder.util import get_instance
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .const import (
-    CONF_API_TOKEN,
-    CONF_ENERGY_ID,
-    CONF_METERING_POINTS,
-    DOMAIN,
-    SCAN_INTERVAL,
-    SENSOR_TYPES,
-)
+from .const import DOMAIN, SCAN_INTERVAL, SENSOR_TYPES, UNIT_TO_AGGREGATED_UNIT
 
 _LOGGER = logging.getLogger(__name__)
 
 
 def _create_statistic_id(metering_point: str, obis: str) -> str:
-    """Create a valid statistic ID from metering point and OBIS code."""
-    # Convert to lowercase and replace any non-alphanumeric characters with underscore
+    """Create a valid statistic ID from metering point and OBIS code.
+
+    Args:
+        metering_point: The metering point identifier
+        obis: The OBIS code
+
+    Returns:
+        A formatted statistic ID string
+
+    """
     clean_mp = re.sub(r"[^a-z0-9]", "_", metering_point.lower())
     clean_obis = re.sub(r"[^a-z0-9]", "_", obis.lower())
     statistic_id = f"{DOMAIN}:{clean_mp}_{clean_obis}"
@@ -64,8 +65,18 @@ class LenedaCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self,
         hass: HomeAssistant,
         config_entry: ConfigEntry,
+        api_token: str,
+        energy_id: str,
     ) -> None:
-        """Initialize the data handler."""
+        """Initialize the coordinator for all metering point subentries.
+
+        Args:
+            hass: Home Assistant instance
+            config_entry: Configuration entry
+            api_token: API token for authentication
+            energy_id: Energy ID for the client
+
+        """
         super().__init__(
             hass,
             _LOGGER,
@@ -74,114 +85,151 @@ class LenedaCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             update_interval=SCAN_INTERVAL,
         )
         self.client = LenedaClient(
-            api_key=config_entry.data[CONF_API_TOKEN],
-            energy_id=config_entry.data[CONF_ENERGY_ID],
+            api_key=api_token,
+            energy_id=energy_id,
         )
-        self.metering_points = config_entry.data[CONF_METERING_POINTS]
-        self.selected_sensors = config_entry.options.get("selected_sensors", {})
-        _LOGGER.debug(
-            "Initialized coordinator with %s metering points and selected sensors: %s",
-            len(self.metering_points),
-            self.selected_sensors,
-        )
+        self._initialize_metering_points(config_entry)
+
+    def _initialize_metering_points(self, config_entry: ConfigEntry) -> None:
+        """Initialize metering points from config entry subentries.
+
+        Args:
+            config_entry: Configuration entry containing metering points
+
+        """
+        self.metering_points = {}
+        for subentry in config_entry.subentries.values():
+            metering_point = subentry.data["metering_point"]
+            sensors = subentry.data["sensors"]
+            self.metering_points[metering_point] = sensors
+            _LOGGER.debug(
+                "Added metering point %s with sensors: %s",
+                metering_point,
+                sensors,
+            )
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
-        """Fetch data from Leneda API and update statistics."""
-        _LOGGER.debug("Starting data update")
+        """Fetch data from Leneda API and update statistics for all metering points.
+
+        Returns:
+            Dictionary containing updated meter data
+
+        Raises:
+            ConfigEntryAuthFailed: If authentication fails
+
+        """
+        _LOGGER.debug("Starting data update for all metering points")
         data = {}
-        for metering_point in self.metering_points:
-            _LOGGER.debug("Processing metering point: %s", metering_point)
-            meter_data: dict[str, Any] = {"values": {}}
-            try:
-                # Only fetch data for sensors the user enabled
-                sensor_types = self.selected_sensors.get(
-                    metering_point, list(SENSOR_TYPES.keys())
+
+        try:
+            for metering_point, selected_sensors in self.metering_points.items():
+                data[metering_point] = await self._process_metering_point(
+                    metering_point, selected_sensors
                 )
-                _LOGGER.debug(
-                    "Selected sensor types for %s: %s", metering_point, sensor_types
-                )
+        except UnauthorizedException as err:
+            _LOGGER.error("Authentication error: %s", err)
+            raise ConfigEntryAuthFailed("Invalid authentication") from err
 
-                for sensor_type in sensor_types:
-                    cfg = SENSOR_TYPES.get(sensor_type)
-                    if not cfg:
-                        _LOGGER.error(
-                            "Unknown sensor type %s for %s",
-                            sensor_type,
-                            metering_point,
-                        )
-                        continue
-                    obis = cfg["obis_code"]
-                    _LOGGER.debug(
-                        "Processing sensor type %s with OBIS code %s", sensor_type, obis
-                    )
-
-                    await self._update_statistics(metering_point, obis)
-                    # Get current total for sensor
-                    current_total = await self._get_current_total(metering_point, obis)
-                    _LOGGER.debug(
-                        "Current total for %s %s: %s",
-                        metering_point,
-                        obis,
-                        current_total,
-                    )
-                    meter_data["values"][obis] = current_total
-
-            except UnauthorizedException as err:
-                _LOGGER.error(
-                    "Authentication error for metering point %s: %s",
-                    metering_point,
-                    err,
-                )
-                raise ConfigEntryAuthFailed("Invalid authentication") from err
-            except (ConnectionError, TimeoutError, ValueError) as err:
-                _LOGGER.error(
-                    "Error fetching data for metering point %s: %s", metering_point, err
-                )
-
-            data[metering_point] = meter_data
-            _LOGGER.debug("Completed processing metering point %s", metering_point)
-
-        _LOGGER.debug("Completed data update")
+        _LOGGER.debug("Completed data update for all metering points")
         return data
 
-    async def _update_statistics(self, metering_point: str, obis: str) -> None:
-        """Update statistics for a metering point and OBIS code."""
-        statistic_id = _create_statistic_id(metering_point, obis)
-        _LOGGER.debug("Updating statistics for %s", statistic_id)
+    async def _process_metering_point(
+        self, metering_point: str, selected_sensors: list[str]
+    ) -> dict[str, Any]:
+        """Process a single metering point and its sensors.
 
-        # Get last statistics to determine where to start
+        Args:
+            metering_point: The metering point to process
+            selected_sensors: List of sensor types to process
+
+        Returns:
+            Dictionary containing the meter data
+
+        """
+        _LOGGER.debug("Processing metering point: %s", metering_point)
+        meter_data: dict[str, Any] = {"values": {}}
+
+        for sensor_type in selected_sensors:
+            cfg = SENSOR_TYPES.get(sensor_type)
+            if not cfg:
+                _LOGGER.error(
+                    "Unknown sensor type %s for %s",
+                    sensor_type,
+                    metering_point,
+                )
+                continue
+
+            obis = cfg["obis_code"]
+            await self._update_statistics(metering_point, obis)
+            current_total = await self._get_current_total(metering_point, obis)
+            meter_data["values"][obis] = current_total
+
+        return meter_data
+
+    async def _update_statistics(self, metering_point: str, obis: str) -> None:
+        """Update statistics for a metering point and OBIS code.
+
+        Args:
+            metering_point: The metering point to update
+            obis: The OBIS code to update
+
+        """
+        statistic_id = _create_statistic_id(metering_point, obis)
+        start_date = await self._get_statistics_start_date(statistic_id)
+        end_date = datetime.now()
+
+        result = await self._fetch_hourly_data(
+            metering_point, obis, start_date, end_date
+        )
+        if not result.aggregated_time_series:
+            return
+
+        await self._process_and_store_statistics(
+            statistic_id, metering_point, obis, result.aggregated_time_series
+        )
+
+    async def _get_statistics_start_date(self, statistic_id: str) -> datetime:
+        """Get the start date for statistics update.
+
+        Args:
+            statistic_id: The statistic ID to check
+
+        Returns:
+            The start date for fetching statistics
+
+        """
         last_stat = await get_instance(self.hass).async_add_executor_job(
             get_last_statistics, self.hass, 1, statistic_id, True, set()
         )
 
         if not last_stat:
-            _LOGGER.debug(
-                "No existing statistics found for %s, starting new fetch with last 52 weeks",
-                statistic_id,
-            )
-            start_date = datetime.now() - timedelta(
-                weeks=52
-            )  # Start with the last 52 weeks
-        else:
-            start_date = dt_util.utc_from_timestamp(last_stat[statistic_id][0]["end"])
-            # Add a buffer to ensure we don't miss any data
-            start_date = start_date - timedelta(days=7)
-            _LOGGER.debug(
-                "Found existing statistics for %s, starting new fetch from %s",
-                statistic_id,
-                start_date,
-            )
+            return datetime.now() - timedelta(weeks=52)
 
-        # API will have a lag of 1 day
-        end_date = datetime.now()
+        start_date = dt_util.utc_from_timestamp(last_stat[statistic_id][0]["end"])
+        return start_date - timedelta(days=7)
+
+    async def _fetch_hourly_data(
+        self, metering_point: str, obis: str, start_date: datetime, end_date: datetime
+    ):
+        """Fetch hourly aggregated data from the API.
+
+        Args:
+            metering_point: The metering point to fetch data for
+            obis: The OBIS code to fetch data for
+            start_date: Start date for the data fetch
+            end_date: End date for the data fetch
+
+        Returns:
+            The API response containing aggregated time series data
+
+        """
         _LOGGER.debug(
             "Fetching hourly data for %s from %s to %s",
-            statistic_id,
+            _create_statistic_id(metering_point, obis),
             start_date,
             end_date,
         )
 
-        # Get hourly data
         result = await self.client.get_aggregated_metering_data(
             metering_point,
             obis,
@@ -190,27 +238,49 @@ class LenedaCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             "Hour",
             "Accumulation",
         )
-        _LOGGER.debug(
-            "Successfully fetched hourly data for %s, %d values found",
-            statistic_id,
-            len(result.aggregated_time_series),
-        )
-
-        if not hasattr(result, "aggregated_time_series"):
-            _LOGGER.debug("No time series data found for %s", statistic_id)
-            return
 
         _LOGGER.debug(
-            "Found %s data points for %s",
+            "Successfully fetched hourly data, %d values found",
             len(result.aggregated_time_series),
-            statistic_id,
         )
+        return result
 
-        # Get existing statistics to avoid duplicates
-        stats = await get_instance(self.hass).async_add_executor_job(
+    async def _process_and_store_statistics(
+        self,
+        statistic_id: str,
+        metering_point: str,
+        obis: str,
+        time_series: list,
+    ) -> None:
+        """Process time series data and store statistics.
+
+        Args:
+            statistic_id: The statistic ID to store data for
+            metering_point: The metering point identifier
+            obis: The OBIS code
+            time_series: List of time series data points
+
+        """
+        stats = await self._get_existing_statistics(statistic_id)
+        statistics = await self._prepare_statistics(statistic_id, time_series, stats)
+
+        if statistics:
+            await self._store_statistics(statistic_id, metering_point, obis, statistics)
+
+    async def _get_existing_statistics(self, statistic_id: str) -> dict:
+        """Get existing statistics for a given ID.
+
+        Args:
+            statistic_id: The statistic ID to fetch data for
+
+        Returns:
+            Dictionary containing existing statistics
+
+        """
+        return await get_instance(self.hass).async_add_executor_job(
             statistics_during_period,
             self.hass,
-            start_date,
+            datetime.now() - timedelta(weeks=52),
             None,
             {statistic_id},
             "hour",
@@ -218,87 +288,102 @@ class LenedaCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             {"sum"},
         )
 
+    async def _prepare_statistics(
+        self, statistic_id: str, time_series: list, existing_stats: dict
+    ) -> list[StatisticData]:
+        """Prepare statistics data for storage.
+
+        Args:
+            statistic_id: The statistic ID
+            time_series: List of time series data points
+            existing_stats: Dictionary of existing statistics
+
+        Returns:
+            List of prepared StatisticData objects
+
+        """
         last_stats_time = (
-            stats[statistic_id][0]["start"] if stats and statistic_id in stats else None
+            existing_stats[statistic_id][0]["start"]
+            if existing_stats and statistic_id in existing_stats
+            else None
         )
         last_sum = (
-            float(cast(float, stats[statistic_id][0]["sum"]))
-            if stats
-            and statistic_id in stats
-            and stats[statistic_id][0]["sum"] is not None
+            float(cast(float, existing_stats[statistic_id][0]["sum"]))
+            if existing_stats
+            and statistic_id in existing_stats
+            and existing_stats[statistic_id][0]["sum"] is not None
             else 0.0
-        )
-        _LOGGER.debug(
-            "Last statistics time: %s, last sum: %s for %s",
-            last_stats_time,
-            last_sum,
-            statistic_id,
         )
 
         statistics = []
-        new_points = 0
-        skipped_points = 0
-        for point in result.aggregated_time_series:
-            point_time = point.started_at
+        for point in time_series:
             if (
                 last_stats_time is not None
-                and point_time.timestamp() <= last_stats_time
+                and point.started_at.timestamp() <= last_stats_time
             ):
-                skipped_points += 1
                 continue
 
             value = float(point.value)
             last_sum += value
-            new_points += 1
-
             statistics.append(
                 StatisticData(
-                    start=point_time,
+                    start=point.started_at,
                     state=value,
                     sum=last_sum,
                 )
             )
 
-        _LOGGER.debug(
-            "Processed %s points for %s: %s new, %s skipped",
-            len(result.aggregated_time_series),
-            statistic_id,
-            new_points,
-            skipped_points,
+        return statistics
+
+    async def _store_statistics(
+        self,
+        statistic_id: str,
+        metering_point: str,
+        obis: str,
+        statistics: list[StatisticData],
+    ) -> None:
+        """Store statistics in Home Assistant.
+
+        Args:
+            statistic_id: The statistic ID
+            metering_point: The metering point identifier
+            obis: The OBIS code
+            statistics: List of statistics to store
+
+        """
+        obis_info = get_obis_info(obis)
+        unit_of_measurement = UNIT_TO_AGGREGATED_UNIT.get(
+            obis_info.unit.lower(), obis_info.unit
         )
 
-        if statistics:
-            _LOGGER.debug(
-                "Adding %s new statistics for %s", len(statistics), statistic_id
-            )
-            async_add_external_statistics(
-                self.hass,
-                StatisticMetaData(
-                    mean_type=StatisticMeanType.NONE,
-                    has_sum=True,
-                    name=f"{metering_point} {obis}",
-                    source=DOMAIN,
-                    statistic_id=statistic_id,
-                    unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-                ),
-                statistics,
-            )
-            _LOGGER.debug("Successfully added statistics for %s", statistic_id)
-        else:
-            _LOGGER.debug("No new statistics to add for %s", statistic_id)
+        async_add_external_statistics(
+            self.hass,
+            StatisticMetaData(
+                mean_type=StatisticMeanType.NONE,
+                has_sum=True,
+                name=f"{metering_point} {obis}",
+                source=DOMAIN,
+                statistic_id=statistic_id,
+                unit_of_measurement=unit_of_measurement,
+            ),
+            statistics,
+        )
+        _LOGGER.debug("Successfully added statistics for %s", statistic_id)
 
     async def _get_current_total(self, metering_point: str, obis: str) -> float | None:
-        """Get current total consumption for a metering point and OBIS code."""
+        """Get current total consumption for a metering point and OBIS code.
+
+        Args:
+            metering_point: The metering point to get data for
+            obis: The OBIS code to get data for
+
+        Returns:
+            The current total consumption or None if no data available
+
+        """
         current_year = datetime.now().year
         start_date = datetime(current_year, 1, 1)
         end_date = datetime.now()
-        _LOGGER.debug(
-            "Fetching current total for %s %s from %s to %s",
-            metering_point,
-            obis,
-            start_date,
-            end_date,
-        )
 
         result = await self.client.get_aggregated_metering_data(
             metering_point,
@@ -308,27 +393,8 @@ class LenedaCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             "Infinite",
             "Accumulation",
         )
-        _LOGGER.debug(
-            "Successfully fetched current total for %s %s: %s",
-            metering_point,
-            obis,
-            result.to_dict(),
-        )
-
-        if not hasattr(result, "aggregated_time_series"):
-            _LOGGER.debug(
-                "No time series data found for current total of %s %s",
-                metering_point,
-                obis,
-            )
-            return None
 
         if not result.aggregated_time_series:
-            _LOGGER.debug(
-                "Empty time series data found for current total of %s %s",
-                metering_point,
-                obis,
-            )
             return None
 
         total = sum(float(pt.value) for pt in result.aggregated_time_series)

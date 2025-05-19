@@ -5,12 +5,18 @@ from datetime import timedelta
 from leneda.obis_codes import ObisCode
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+from homeassistant.const import (
+    UnitOfEnergy,
+    UnitOfPower,
+    UnitOfReactiveEnergy,
+    UnitOfReactivePower,
+)
 
 DOMAIN = "leneda"
 
 CONF_API_TOKEN = "api_token"
 CONF_ENERGY_ID = "energy_id"
-CONF_METERING_POINTS = "metering_points"
+CONF_METERING_POINT = "metering_point"
 
 SCAN_INTERVAL = timedelta(hours=1)
 
@@ -24,7 +30,7 @@ SENSOR_TYPES = {
     },
     "electricity_consumption_reactive": {
         "obis_code": ObisCode.ELEC_CONSUMPTION_REACTIVE,
-        "device_class": None,  # Ideally SensorDeviceClass.REACTIVE_POWER per hour - not supported by Home Assistant
+        "device_class": SensorDeviceClass.REACTIVE_ENERGY,
         "state_class": SensorStateClass.TOTAL_INCREASING,
     },
     "electricity_consumption_covered_layer1": {
@@ -60,7 +66,7 @@ SENSOR_TYPES = {
     },
     "electricity_production_reactive": {
         "obis_code": ObisCode.ELEC_PRODUCTION_REACTIVE,
-        "device_class": None,  # Ideally SensorDeviceClass.REACTIVE_POWER per hour - not supported by Home Assistant
+        "device_class": SensorDeviceClass.REACTIVE_ENERGY,
         "state_class": SensorStateClass.TOTAL_INCREASING,
     },
     "electricity_production_shared_layer1": {
@@ -106,4 +112,7 @@ SENSOR_TYPES = {
     },
 }
 
-UNIT_TO_AGGREGATED_UNIT = {"kW": "kWh", "kVAR": "kVARh"}
+UNIT_TO_AGGREGATED_UNIT = {
+    UnitOfPower.KILO_WATT.lower(): UnitOfEnergy.KILO_WATT_HOUR,
+    UnitOfReactivePower.KILO_VOLT_AMPERE_REACTIVE.lower(): UnitOfReactiveEnergy.KILO_VOLT_AMPERE_REACTIVE_HOUR,
+}
