@@ -7,9 +7,9 @@ from collections.abc import Mapping
 import logging
 from typing import Any, Final
 
+from aiohttp import ClientResponseError
 from leneda import LenedaClient
 from leneda.exceptions import ForbiddenException, UnauthorizedException
-from leneda.obis_codes import ObisCode
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -77,20 +77,23 @@ class LenedaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     api_key=self._api_token,
                     energy_id=self._energy_id,
                 )
-                # Use a dummy metering point ID to test authentication
-                await client.probe_metering_point_obis_code(
-                    "dummy-metering-point", ObisCode.ELEC_CONSUMPTION_ACTIVE
-                )
+                # Use a dummy, intentionally invalid metering point access request to test authentication.
+                # Leneda doesn't provide a way to verify authentication data without requesting actual data
+                # and at this point, the user might not even have a metering point configured yet
+                await client.request_metering_data_access("", "", [], [])
             except UnauthorizedException:
                 errors = {"base": ERROR_UNAUTHORIZED}
             except ForbiddenException:
                 errors = {"base": ERROR_FORBIDDEN}
-            else:
-                # Update the config entry with new token
-                return self.async_update_reload_and_abort(
-                    self._get_reauth_entry(),
-                    data_updates={CONF_API_TOKEN: self._api_token},
-                )
+            except ClientResponseError as e:
+                # We expect a 400 response if authentication is successful and our request is invalid
+                if e.status == 400:
+                    # Update the config entry with new token
+                    return self.async_update_reload_and_abort(
+                        self._get_reauth_entry(),
+                        data_updates={CONF_API_TOKEN: self._api_token},
+                    )
+                raise
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -125,22 +128,27 @@ class LenedaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     api_key=self._api_token,
                     energy_id=self._energy_id,
                 )
-                # Use a dummy metering point ID to test authentication
-                await client.probe_metering_point_obis_code(
-                    "dummy-metering-point", ObisCode.ELEC_CONSUMPTION_ACTIVE
-                )
+                # Use a dummy, intentionally invalid metering point access request to test authentication.
+                # Leneda doesn't provide a way to verify authentication data without requesting actual data
+                # and at this point, the user might not even have a metering point configured yet
+                await client.request_metering_data_access("", "", [], [])
             except UnauthorizedException:
                 errors = {"base": ERROR_UNAUTHORIZED}
             except ForbiddenException:
                 errors = {"base": ERROR_FORBIDDEN}
-            else:
-                return self.async_create_entry(
-                    title=self._energy_id,
-                    data={
-                        CONF_API_TOKEN: self._api_token,
-                        CONF_ENERGY_ID: self._energy_id,
-                    },
-                )
+            except ClientResponseError as e:
+                # We expect a 400 response if authentication is successful and our request is invalid
+                if e.status == 400:
+                    # Create the config entry
+                    return self.async_create_entry(
+                        title=self._energy_id,
+                        data={
+                            CONF_API_TOKEN: self._api_token,
+                            CONF_ENERGY_ID: self._energy_id,
+                        },
+                    )
+                raise
+
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(

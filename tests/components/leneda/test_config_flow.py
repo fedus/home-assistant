@@ -6,6 +6,7 @@ import asyncio
 from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiohttp import ClientResponseError
 from leneda.exceptions import ForbiddenException, UnauthorizedException
 from leneda.obis_codes import ObisCode
 import pytest
@@ -64,8 +65,15 @@ async def test_form_user_success(hass: HomeAssistant, recorder_mock: Recorder) -
     assert result["step_id"] == "user"
 
     with patch(
-        "homeassistant.components.leneda.config_flow.LenedaClient.probe_metering_point_obis_code",
+        "homeassistant.components.leneda.config_flow.LenedaClient.request_metering_data_access",
         new_callable=AsyncMock,
+        side_effect=ClientResponseError(
+            status=400,
+            history=(),
+            message="Invalid request",
+            headers=None,
+            request_info=MagicMock(),
+        ),
     ):
         result2 = await hass.config_entries.flow.async_configure(
             result["flow_id"],
@@ -92,7 +100,7 @@ async def test_form_user_unauthorized(
     )
 
     with patch(
-        "homeassistant.components.leneda.config_flow.LenedaClient.probe_metering_point_obis_code",
+        "homeassistant.components.leneda.config_flow.LenedaClient.request_metering_data_access",
         new_callable=AsyncMock,
         side_effect=UnauthorizedException,
     ):
@@ -118,7 +126,7 @@ async def test_form_user_forbidden(
     )
 
     with patch(
-        "homeassistant.components.leneda.config_flow.LenedaClient.probe_metering_point_obis_code",
+        "homeassistant.components.leneda.config_flow.LenedaClient.request_metering_data_access",
         new_callable=AsyncMock,
         side_effect=ForbiddenException,
     ):
@@ -679,8 +687,15 @@ async def test_reauth_success(
     assert result["step_id"] == "reauth_confirm"
 
     with patch(
-        "homeassistant.components.leneda.config_flow.LenedaClient.probe_metering_point_obis_code",
+        "homeassistant.components.leneda.config_flow.LenedaClient.request_metering_data_access",
         new_callable=AsyncMock,
+        side_effect=ClientResponseError(
+            status=400,
+            history=(),
+            message="Invalid request",
+            headers=None,
+            request_info=MagicMock(),
+        ),
     ):
         result2 = await hass.config_entries.flow.async_configure(
             result["flow_id"],
@@ -717,7 +732,7 @@ async def test_reauth_unauthorized(
     assert result["step_id"] == "reauth_confirm"
 
     with patch(
-        "homeassistant.components.leneda.config_flow.LenedaClient.probe_metering_point_obis_code",
+        "homeassistant.components.leneda.config_flow.LenedaClient.request_metering_data_access",
         new_callable=AsyncMock,
         side_effect=UnauthorizedException,
     ):
@@ -757,7 +772,7 @@ async def test_reauth_forbidden(
     assert result["step_id"] == "reauth_confirm"
 
     with patch(
-        "homeassistant.components.leneda.config_flow.LenedaClient.probe_metering_point_obis_code",
+        "homeassistant.components.leneda.config_flow.LenedaClient.request_metering_data_access",
         new_callable=AsyncMock,
         side_effect=ForbiddenException,
     ):
@@ -795,5 +810,6 @@ async def test_reauth_flow_description(
 
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "reauth_confirm"
+    assert result["description_placeholders"] is not None
     assert "energy_id" in result["description_placeholders"]
     assert result["description_placeholders"]["energy_id"] == MOCK_ENERGY_ID
