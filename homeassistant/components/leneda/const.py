@@ -1,6 +1,9 @@
 """Constants for the Leneda integration."""
 
+from __future__ import annotations
+
 from datetime import timedelta
+from typing import TypedDict
 
 from leneda.obis_codes import ObisCode
 
@@ -20,8 +23,17 @@ CONF_METERING_POINT = "metering_point"
 
 SCAN_INTERVAL = timedelta(hours=1)
 
+
+class SensorTypeConfig(TypedDict):
+    """Configuration for a sensor type."""
+
+    obis_code: ObisCode
+    device_class: SensorDeviceClass | None
+    state_class: SensorStateClass
+
+
 # Sensor types and their corresponding OBIS codes
-SENSOR_TYPES = {
+SENSOR_TYPES: dict[str, SensorTypeConfig] = {
     # Electricity Consumption
     "electricity_consumption_active": {
         "obis_code": ObisCode.ELEC_CONSUMPTION_ACTIVE,

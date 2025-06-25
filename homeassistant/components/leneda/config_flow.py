@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from asyncio import Task
 from collections.abc import Mapping
+from datetime import datetime, timedelta
 import logging
 from typing import Any, Final
 
-from aiohttp import ClientResponseError
 from leneda import LenedaClient
-from leneda.exceptions import ForbiddenException, UnauthorizedException
+from leneda.exceptions import (
+    ForbiddenException,
+    MeteringPointNotFoundException,
+    UnauthorizedException,
+)
+from leneda.models import AuthenticationProbeResult
+from leneda.obis_codes import ObisCode
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -77,23 +83,23 @@ class LenedaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     api_key=self._api_token,
                     energy_id=self._energy_id,
                 )
-                # Use a dummy, intentionally invalid metering point access request to test authentication.
-                # Leneda doesn't provide a way to verify authentication data without requesting actual data
-                # and at this point, the user might not even have a metering point configured yet
-                await client.request_metering_data_access("", "", [], [])
-            except UnauthorizedException:
-                errors = {"base": ERROR_UNAUTHORIZED}
-            except ForbiddenException:
-                errors = {"base": ERROR_FORBIDDEN}
-            except ClientResponseError as e:
-                # We expect a 400 response if authentication is successful and our request is invalid
-                if e.status == 400:
-                    # Update the config entry with new token
+
+                credentials_probe_result = await client.probe_credentials()
+
+                if credentials_probe_result != AuthenticationProbeResult.FAILURE:
+                    if credentials_probe_result == AuthenticationProbeResult.UNKNOWN:
+                        _LOGGER.warning(
+                            "Unknown authentication probe result for energy ID %s. As credentials might be valid, we'll try to use them anyway",
+                            self._energy_id,
+                        )
                     return self.async_update_reload_and_abort(
                         self._get_reauth_entry(),
                         data_updates={CONF_API_TOKEN: self._api_token},
                     )
-                raise
+
+                errors = {"base": ERROR_UNAUTHORIZED}
+            except ForbiddenException:
+                errors = {"base": ERROR_FORBIDDEN}
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -128,18 +134,15 @@ class LenedaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     api_key=self._api_token,
                     energy_id=self._energy_id,
                 )
-                # Use a dummy, intentionally invalid metering point access request to test authentication.
-                # Leneda doesn't provide a way to verify authentication data without requesting actual data
-                # and at this point, the user might not even have a metering point configured yet
-                await client.request_metering_data_access("", "", [], [])
-            except UnauthorizedException:
-                errors = {"base": ERROR_UNAUTHORIZED}
-            except ForbiddenException:
-                errors = {"base": ERROR_FORBIDDEN}
-            except ClientResponseError as e:
-                # We expect a 400 response if authentication is successful and our request is invalid
-                if e.status == 400:
-                    # Create the config entry
+
+                credentials_probe_result = await client.probe_credentials()
+
+                if credentials_probe_result != AuthenticationProbeResult.FAILURE:
+                    if credentials_probe_result == AuthenticationProbeResult.UNKNOWN:
+                        _LOGGER.warning(
+                            "Unknown authentication probe result for energy ID %s. As credentials might be valid, we'll try to use them anyway",
+                            self._energy_id,
+                        )
                     return self.async_create_entry(
                         title=self._energy_id,
                         data={
@@ -147,7 +150,10 @@ class LenedaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_ENERGY_ID: self._energy_id,
                         },
                     )
-                raise
+
+                errors = {"base": ERROR_UNAUTHORIZED}
+            except ForbiddenException:
+                errors = {"base": ERROR_FORBIDDEN}
 
         return self.async_show_form(
             step_id="user",
@@ -213,7 +219,31 @@ class LenedaSubEntryFlowHandler(ConfigSubentryFlow):
                                 reason=ERROR_DUPLICATE_METERING_POINT
                             )
                 if not errors:
-                    return await self.async_step_setup_type()
+                    try:
+                        parent_entry = self._get_entry()
+                        api_token = parent_entry.data[CONF_API_TOKEN]
+                        energy_id = parent_entry.data[CONF_ENERGY_ID]
+
+                        client = LenedaClient(
+                            api_key=api_token,
+                            energy_id=energy_id,
+                        )
+
+                        start_date = datetime.now() - timedelta(days=7)
+                        end_date = datetime.now()
+
+                        await client.get_aggregated_metering_data(
+                            self._metering_point,
+                            ObisCode.ELEC_CONSUMPTION_ACTIVE,
+                            start_date,
+                            end_date,
+                            "Hour",
+                            "Accumulation",
+                        )
+                    except MeteringPointNotFoundException:
+                        errors["base"] = ERROR_INVALID_METERING_POINT
+                    else:
+                        return await self.async_step_setup_type()
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -277,7 +307,7 @@ class LenedaSubEntryFlowHandler(ConfigSubentryFlow):
             self._probing_task = None
             return self.async_abort(reason=ERROR_FORBIDDEN)
 
-    async def _fetch_obis_codes(self, api_token: str, energy_id: str) -> list[str]:
+    async def _fetch_obis_codes(self, api_token: str, energy_id: str) -> list[ObisCode]:
         """Fetch supported OBIS codes from the Leneda API."""
         client = LenedaClient(
             api_key=api_token,

@@ -7,7 +7,11 @@ from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiohttp import ClientResponseError
-from leneda.exceptions import ForbiddenException, UnauthorizedException
+from leneda.exceptions import (
+    ForbiddenException,
+    MeteringPointNotFoundException,
+    UnauthorizedException,
+)
 from leneda.obis_codes import ObisCode
 import pytest
 
@@ -189,13 +193,18 @@ async def test_subentry_init_happyflow(
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "init"
 
-    # Configure the metering point
-    result2 = await hass.config_entries.subentries.async_configure(
-        result["flow_id"],
-        {
-            "metering_point": MOCK_METERING_POINT,
-        },
-    )
+    # Configure the metering point with mocked validation
+    with patch(
+        "homeassistant.components.leneda.config_flow.LenedaClient.get_aggregated_metering_data",
+        new_callable=AsyncMock,
+        return_value=MagicMock(),
+    ):
+        result2 = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                "metering_point": MOCK_METERING_POINT,
+            },
+        )
 
     assert result2["type"] == FlowResultType.MENU
     assert result2["step_id"] == "setup_type"
@@ -223,6 +232,40 @@ async def test_subentry_init_invalid_metering_point(
             "metering_point": "",
         },
     )
+
+    assert result2["type"] == FlowResultType.FORM
+    assert result2["step_id"] == "init"
+    assert result2["errors"] == {"base": "invalid_metering_point"}
+
+
+async def test_subentry_init_metering_point_not_found(
+    hass: HomeAssistant, recorder_mock: Recorder, mock_config_entry: MockConfigEntry
+) -> None:
+    """Test subentry initialization with metering point not found."""
+    # Add a mock parent entry
+    mock_config_entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    # Start subentry flow
+    result = await hass.config_entries.subentries.async_init(
+        (mock_config_entry.entry_id, "metering_point"),
+        context={"source": config_entries.SOURCE_USER},
+    )
+
+    # Configure with a metering point that doesn't exist
+    with patch(
+        "homeassistant.components.leneda.config_flow.LenedaClient.get_aggregated_metering_data",
+        new_callable=AsyncMock,
+        side_effect=MeteringPointNotFoundException,
+    ):
+        result2 = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                "metering_point": "INVALID_MP",
+            },
+        )
 
     assert result2["type"] == FlowResultType.FORM
     assert result2["step_id"] == "init"
@@ -292,12 +335,17 @@ async def test_subentry_setup_type(
         context={"source": config_entries.SOURCE_USER},
     )
 
-    result2 = await hass.config_entries.subentries.async_configure(
-        result["flow_id"],
-        {
-            "metering_point": MOCK_METERING_POINT,
-        },
-    )
+    with patch(
+        "homeassistant.components.leneda.config_flow.LenedaClient.get_aggregated_metering_data",
+        new_callable=AsyncMock,
+        return_value=MagicMock(),
+    ):
+        result2 = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                "metering_point": MOCK_METERING_POINT,
+            },
+        )
 
     assert result2["type"] == FlowResultType.MENU
     assert result2["step_id"] == "setup_type"
@@ -322,12 +370,17 @@ async def test_subentry_probe_success(
     )
 
     # Enter metering point
-    result2 = await hass.config_entries.subentries.async_configure(
-        result["flow_id"],
-        {
-            "metering_point": MOCK_METERING_POINT,
-        },
-    )
+    with patch(
+        "homeassistant.components.leneda.config_flow.LenedaClient.get_aggregated_metering_data",
+        new_callable=AsyncMock,
+        return_value=MagicMock(),
+    ):
+        result2 = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                "metering_point": MOCK_METERING_POINT,
+            },
+        )
 
     # Should show setup type menu
     assert result2["type"] == FlowResultType.MENU
@@ -387,12 +440,17 @@ async def test_subentry_probe_no_sensors(
     )
 
     # Enter metering point
-    result2 = await hass.config_entries.subentries.async_configure(
-        result["flow_id"],
-        {
-            "metering_point": MOCK_METERING_POINT,
-        },
-    )
+    with patch(
+        "homeassistant.components.leneda.config_flow.LenedaClient.get_aggregated_metering_data",
+        new_callable=AsyncMock,
+        return_value=MagicMock(),
+    ):
+        result2 = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                "metering_point": MOCK_METERING_POINT,
+            },
+        )
 
     # Should show setup type menu
     assert result2["type"] == FlowResultType.MENU
@@ -451,12 +509,17 @@ async def test_subentry_probe_unauthorized(
     )
 
     # Enter metering point
-    result2 = await hass.config_entries.subentries.async_configure(
-        result["flow_id"],
-        {
-            "metering_point": MOCK_METERING_POINT,
-        },
-    )
+    with patch(
+        "homeassistant.components.leneda.config_flow.LenedaClient.get_aggregated_metering_data",
+        new_callable=AsyncMock,
+        return_value=MagicMock(),
+    ):
+        result2 = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                "metering_point": MOCK_METERING_POINT,
+            },
+        )
 
     # Should show setup type menu
     assert result2["type"] == FlowResultType.MENU
@@ -495,12 +558,17 @@ async def test_subentry_probe_forbidden(
         context={"source": config_entries.SOURCE_USER},
     )
 
-    result2 = await hass.config_entries.subentries.async_configure(
-        result["flow_id"],
-        {
-            "metering_point": MOCK_METERING_POINT,
-        },
-    )
+    with patch(
+        "homeassistant.components.leneda.config_flow.LenedaClient.get_aggregated_metering_data",
+        new_callable=AsyncMock,
+        return_value=MagicMock(),
+    ):
+        result2 = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                "metering_point": MOCK_METERING_POINT,
+            },
+        )
 
     with patch(
         "homeassistant.components.leneda.config_flow.LenedaClient.get_supported_obis_codes",
@@ -533,12 +601,17 @@ async def test_subentry_manual_success(
         context={"source": config_entries.SOURCE_USER},
     )
 
-    result2 = await hass.config_entries.subentries.async_configure(
-        result["flow_id"],
-        {
-            "metering_point": MOCK_METERING_POINT,
-        },
-    )
+    with patch(
+        "homeassistant.components.leneda.config_flow.LenedaClient.get_aggregated_metering_data",
+        new_callable=AsyncMock,
+        return_value=MagicMock(),
+    ):
+        result2 = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                "metering_point": MOCK_METERING_POINT,
+            },
+        )
 
     result3 = await hass.config_entries.subentries.async_configure(
         result2["flow_id"],
@@ -579,12 +652,17 @@ async def test_subentry_manual_no_sensors(
         context={"source": config_entries.SOURCE_USER},
     )
 
-    result2 = await hass.config_entries.subentries.async_configure(
-        result["flow_id"],
-        {
-            "metering_point": MOCK_METERING_POINT,
-        },
-    )
+    with patch(
+        "homeassistant.components.leneda.config_flow.LenedaClient.get_aggregated_metering_data",
+        new_callable=AsyncMock,
+        return_value=MagicMock(),
+    ):
+        result2 = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                "metering_point": MOCK_METERING_POINT,
+            },
+        )
 
     result3 = await hass.config_entries.subentries.async_configure(
         result2["flow_id"],

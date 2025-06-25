@@ -9,7 +9,7 @@ from typing import Any, cast
 
 from leneda import LenedaClient
 from leneda.exceptions import UnauthorizedException
-from leneda.obis_codes import get_obis_info
+from leneda.obis_codes import ObisCode, get_obis_info
 
 from homeassistant.components.recorder.models import (
     StatisticData,
@@ -166,7 +166,7 @@ class LenedaCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
         return meter_data
 
-    async def _update_statistics(self, metering_point: str, obis: str) -> None:
+    async def _update_statistics(self, metering_point: str, obis: ObisCode) -> None:
         """Update statistics for a metering point and OBIS code.
 
         Args:
@@ -209,7 +209,11 @@ class LenedaCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         return start_date - timedelta(days=7)
 
     async def _fetch_hourly_data(
-        self, metering_point: str, obis: str, start_date: datetime, end_date: datetime
+        self,
+        metering_point: str,
+        obis: ObisCode,
+        start_date: datetime,
+        end_date: datetime,
     ):
         """Fetch hourly aggregated data from the API.
 
@@ -370,7 +374,9 @@ class LenedaCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         )
         _LOGGER.debug("Successfully added statistics for %s", statistic_id)
 
-    async def _get_current_total(self, metering_point: str, obis: str) -> float | None:
+    async def _get_current_total(
+        self, metering_point: str, obis: ObisCode
+    ) -> float | None:
         """Get current total consumption for a metering point and OBIS code.
 
         Args:
